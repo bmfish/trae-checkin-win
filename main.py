@@ -16,6 +16,7 @@
 """
 import argparse
 import ctypes
+import json
 import msvcrt
 import os
 import sys
@@ -38,8 +39,48 @@ except Exception:
 
 APP_NAME = "TraeAutoCheckin"
 RUN_KEY = r"Software\Microsoft\Windows\CurrentVersion\Run"
+SETTINGS_FILE = "settings.json"
 DEFAULT_START_HOUR = 9
 DEFAULT_INTERVAL = 60
+
+
+def load_settings(directory):
+    try:
+        with open(os.path.join(directory, SETTINGS_FILE), encoding="utf-8") as f:
+            obj = json.load(f)
+        return obj if isinstance(obj, dict) else {}
+    except (OSError, ValueError, TypeError):
+        return {}
+
+
+def save_settings(directory, values):
+    merged = load_settings(directory)
+    merged.update(values)
+    try:
+        os.makedirs(directory, exist_ok=True)
+        tmp = os.path.join(directory, SETTINGS_FILE + ".tmp")
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(merged, f, ensure_ascii=False, indent=1)
+        os.replace(tmp, os.path.join(directory, SETTINGS_FILE))
+    except OSError:
+        pass
+
+
+def configured_start_hour(state_dir=None):
+    """签到起始小时：默认 9，界面/命令行可改"""
+    raw = load_settings(state_dir or checkin_core.state_dir()).get("start_hour")
+    try:
+        return max(0, min(23, int(raw)))
+    except (TypeError, ValueError):
+        return DEFAULT_START_HOUR
+
+
+def effective_start_hour(args, state_dir=None):
+    """命令行显式 --start-hour 优先，否则读界面保存的配置"""
+    value = getattr(args, "start_hour", None)
+    if value is not None:
+        return max(0, min(23, int(value)))
+    return configured_start_hour(state_dir)
 
 
 @contextmanager
@@ -110,20 +151,23 @@ def build_tray(show=None, checkin=None, toggle_autostart=None, quit_app=None):
     return pystray.Icon("trae-checkin", make_tray_icon(), "Trae 签到", menu)
 
 
-def launch_command():
-    """开机自启命令：始终以 --silent 常驻（不弹窗口）"""
+def launch_command(start_hour=None):
+    """开机自启命令：--silent 常驻，可带 --start-hour 固定签到起始小时"""
     extra = " --silent"
+    if start_hour is not None:
+        extra += " --start-hour %d" % int(start_hour)
     if getattr(sys, "frozen", False):
         return '"%s"%s' % (sys.executable, extra)
     return '"%s" "%s"%s' % (sys.executable, os.path.abspath(__file__), extra)
 
 
-def set_autostart(enable):
+def set_autostart(enable, start_hour=None):
     import winreg
     with winreg.OpenKey(winreg.HKEY_CURRENT_USER, RUN_KEY, 0,
                         winreg.KEY_SET_VALUE) as key:
         if enable:
-            winreg.SetValueEx(key, APP_NAME, 0, winreg.REG_SZ, launch_command())
+            winreg.SetValueEx(key, APP_NAME, 0, winreg.REG_SZ,
+                              launch_command(start_hour))
         else:
             try:
                 winreg.DeleteValue(key, APP_NAME)
@@ -243,7 +287,6 @@ def run_ui(args, show=True):
     note_label.pack(anchor="w")
     tip_label = tk.Label(foot_left, text="", bg=BG, fg=MUTED,
                          font=(FONT, 8), justify="left")
-    tip_label.pack(anchor="w", pady=(2, 0))
 
     state = {"busy": False, "signing": False}
 
@@ -308,6 +351,24 @@ def run_ui(args, show=True):
         signed = sum(1 for acc in accounts if store.done_today(acc.uid, today))
         return accounts, signed, store.today_credits(today)
 
+    def sign_note(accounts, signed):
+        if not accounts:
+            return "签到：未发现客户端账号"
+        text = "签到：%d/%d 已签" % (signed, len(accounts))
+        gained = checkin_core.CheckinStore(args.state_dir).today_credits(
+            datetime.now().strftime("%Y-%m-%d"))
+        if gained:
+            text += " · 今日获得 +%s 积分" % fmt_num(gained)
+        if signed < len(accounts):
+            hour = effective_start_hour(args, store_dir)
+            today = datetime.now().strftime("%Y-%m-%d")
+            for acc in accounts:
+                if not checkin_core.CheckinStore(args.state_dir).done_today(acc.uid, today):
+                    minute = checkin_core.slot_minute(acc.uid, today)
+                    text += " · 今天 %02d:%02d 自动签" % (hour, minute)
+                    break
+        return text
+
     def update_sign_button():
         accounts, signed, gained = sign_summary()
         if not accounts:
@@ -315,8 +376,7 @@ def run_ui(args, show=True):
             sign_btn.configure(state=tk.DISABLED, text="无账号", bg="#1f2732",
                                disabledforeground=MUTED)
             return
-        note_label.configure(text="签到：%d/%d 已签 · 今日获得 +%s 积分" % (
-            signed, len(accounts), fmt_num(gained)))
+        note_label.configure(text=sign_note(accounts, signed))
         if signed >= len(accounts):
             # 今日全部账号已签：按钮禁用，避免重复领取
             sign_btn.configure(state=tk.DISABLED, text="今日已签", bg="#1f2732",
@@ -357,7 +417,7 @@ def run_ui(args, show=True):
             try:
                 with process_lock(store.dir, timeout=10):
                     checkin_core.run_once(store, force=True, enabled=True,
-                                          start_hour=args.start_hour,
+                                          start_hour=effective_start_hour(args, store_dir),
                                           emit=lambda m: None)
             except Exception:
                 pass
@@ -370,13 +430,42 @@ def run_ui(args, show=True):
 
         threading.Thread(target=work, daemon=True).start()
 
+    hour_var = tk.StringVar(value="%02d" % configured_start_hour(store_dir))
+
+    def on_hour_change(*_):
+        try:
+            hour = max(0, min(23, int(float(hour_var.get()))))
+        except (TypeError, ValueError):
+            hour_var.set("%02d" % configured_start_hour(store_dir))
+            return
+        hour_var.set("%02d" % hour)
+        save_settings(store_dir, {"start_hour": hour})
+        if autostart_enabled():
+            set_autostart(True, hour)   # 自启命令同步新的起始小时
+        update_sign_button()
+        tip_label.configure(text="已保存：%d 点后随机一分钟自动签到" % hour)
+
+    time_row = tk.Frame(foot_left, bg=BG)
+    time_row.pack(anchor="w", pady=(4, 0))
+    tk.Label(time_row, text="签到时间", bg=BG, fg=MUTED,
+             font=(FONT, 8)).pack(side="left")
+    hour_box = tk.Spinbox(time_row, from_=0, to=23, width=3, textvariable=hour_var,
+                          command=on_hour_change, font=(FONT, 9), justify="center",
+                          bg=CARD, fg=FG, insertbackground=FG, relief="flat", bd=0,
+                          buttonbackground="#222c38")
+    hour_box.pack(side="left", padx=4)
+    hour_box.bind("<Return>", on_hour_change)
+    hour_box.bind("<FocusOut>", on_hour_change)
+    tk.Label(time_row, text="点后随机一分钟", bg=BG, fg=MUTED,
+             font=(FONT, 8)).pack(side="left")
+
     def update_autostart():
         auto_btn.configure(
             text="开机自启：已开启（点击关闭）" if autostart_enabled()
             else "开机自启：未开启（点击开启）")
 
     def toggle_autostart():
-        set_autostart(not autostart_enabled())
+        set_autostart(not autostart_enabled(), configured_start_hour(store_dir))
         update_autostart()
         try:
             tray.update_menu()
@@ -389,6 +478,7 @@ def run_ui(args, show=True):
                          font=(FONT, 8), padx=0, pady=0)
     auto_btn.pack(anchor="w", pady=(4, 0))
     update_autostart()
+    tip_label.pack(anchor="w", pady=(4, 0))
 
     sign_btn = flat_button("立即签到", do_checkin, primary=True)
     sign_btn.pack(side="right")
@@ -431,9 +521,11 @@ def loop(args):
     while True:
         try:
             store = checkin_core.CheckinStore(args.state_dir)
+            # 每轮重新读配置：界面上改了签到时间立即生效
+            start_hour = effective_start_hour(args, args.state_dir)
             with process_lock(store.dir):
                 checkin_core.run_once(
-                    store, force=False, enabled=True, start_hour=args.start_hour,
+                    store, force=False, enabled=True, start_hour=start_hour,
                     emit=lambda m: None)   # 常驻模式不刷屏，记录在 state.json / checkin.log
         except TimeoutError:
             pass
@@ -457,16 +549,17 @@ def main(argv=None):
     parser.add_argument("--status", action="store_true", help="查看今日状态与最近记录")
     parser.add_argument("--install", action="store_true", help="注册开机自启")
     parser.add_argument("--uninstall", action="store_true", help="取消开机自启")
-    parser.add_argument("--start-hour", type=int, default=DEFAULT_START_HOUR,
-                        help="每天起始小时（默认 9，整点后随机分钟）")
+    parser.add_argument("--start-hour", type=int, default=None,
+                        help="每天起始小时（0-23；缺省读界面配置，未配置为 9）")
     parser.add_argument("--interval", type=int, default=DEFAULT_INTERVAL,
                         help="常驻检查间隔秒数（默认 60）")
     parser.add_argument("--state-dir", default=None, help="状态目录（默认 ~/.trae-checkin）")
     args = parser.parse_args(argv)
 
     if args.install:
-        set_autostart(True)
-        print("已开启开机自启：%s" % launch_command())
+        hour = effective_start_hour(args, args.state_dir)
+        set_autostart(True, hour)
+        print("已开启开机自启：%s" % launch_command(hour))
         return 0
     if args.uninstall:
         set_autostart(False)
@@ -480,7 +573,8 @@ def main(argv=None):
     if args.once:
         with process_lock(store.dir):
             results = checkin_core.run_once(
-                store, force=True, enabled=True, start_hour=args.start_hour)
+                store, force=True, enabled=True,
+                start_hour=effective_start_hour(args, args.state_dir))
         if not results:
             print("没有可签到的账号")
         return 0
