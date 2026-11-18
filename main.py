@@ -298,6 +298,8 @@ def run_ui(args, show=True):
 
     head = tk.Frame(root, bg=BG)
     head.pack(fill="x", padx=20, pady=(18, 4))
+    # 标题栏与内容同为深色，用一条细线区分
+    tk.Frame(root, bg="#2a3541", height=1).place(x=0, y=0, relwidth=1)
     tk.Label(head, text="Trae 今日用量", bg=BG, fg=FG,
              font=(FONT, 15, "bold")).pack(side="left")
     tk.Label(head, text=datetime.now().strftime("%Y-%m-%d"), bg=BG, fg=MUTED,
