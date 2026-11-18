@@ -122,6 +122,33 @@ def hide_console():
         pass
 
 
+def apply_dark_titlebar(root, caption="#0f141a", text="#e6edf3"):
+    """Windows 标题栏改深色：Win10 1903+ 支持暗色模式，Win11 可自定义颜色"""
+    try:
+        root.update_idletasks()
+        hwnd = ctypes.windll.user32.GetParent(root.winfo_id())
+        if not hwnd:
+            return
+        enabled = ctypes.c_int(1)
+        for attr in (20, 19):   # DWMWA_USE_IMMERSIVE_DARK_MODE（旧系统用 19）
+            ctypes.windll.dwmapi.DwmSetWindowAttribute(
+                hwnd, attr, ctypes.byref(enabled), ctypes.sizeof(enabled))
+
+        def colorref(value):
+            r = int(value[1:3], 16)
+            g = int(value[3:5], 16)
+            b = int(value[5:7], 16)
+            return ctypes.c_int(r | (g << 8) | (b << 16))
+
+        # Win11 22H2+：标题栏 / 文字 / 边框跟随界面配色
+        for attr, color in ((35, caption), (36, text), (34, caption)):
+            value = colorref(color)
+            ctypes.windll.dwmapi.DwmSetWindowAttribute(
+                hwnd, attr, ctypes.byref(value), ctypes.sizeof(value))
+    except Exception:
+        pass
+
+
 def make_tray_icon():
     """托盘图标：绿色圆 + 深色对勾"""
     from PIL import Image, ImageDraw
@@ -243,6 +270,7 @@ def run_ui(args, show=True):
     root.geometry("600x500")
     root.minsize(540, 340)
     root.configure(bg=BG)
+    root.after(60, lambda: apply_dark_titlebar(root, caption=BG, text=FG))
     if not show:
         root.withdraw()
 
