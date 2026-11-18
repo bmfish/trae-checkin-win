@@ -284,18 +284,18 @@ def run_ui(args, show=True):
                     line += "  ·  %s token" % fmt_int(item["tokens"])
                 tk.Label(inner, text=line, bg=CARD, fg=ACCENT,
                          font=(FONT, 10)).pack(anchor="w", pady=(4, 0))
-                if item["total"] is not None:
-                    tk.Label(inner,
-                             text="积分余额  %s / %s" % (
-                                 fmt_num(item["consumed"]), fmt_num(item["total"])),
-                             bg=CARD, fg=MUTED, font=(FONT, 9)).pack(
-                        anchor="w", pady=(2, 0))
+                if item["balance"] is not None:
+                    text = "剩余积分  %s" % fmt_num(item["balance"])
+                    if item["total"] is not None:
+                        text += "   /   总积分  %s" % fmt_num(item["total"])
+                    tk.Label(inner, text=text, bg=CARD, fg=ACCENT,
+                             font=(FONT, 9, "bold")).pack(anchor="w", pady=(2, 0))
             else:
                 tk.Label(inner, text=item["message"] or "查询失败", bg=CARD,
                          fg=DANGER, font=(FONT, 9)).pack(anchor="w", pady=(4, 0))
         # 窗口高度按账号数自适应：单账号只占一个框的高度
-        height = 320 + max(1, len(items)) * 90 if items else 360
-        root.geometry("600x%d" % min(max(height, 340), 660))
+        height = 330 + max(1, len(items)) * 95 if items else 370
+        root.geometry("600x%d" % min(max(height, 370), 660))
 
     def sign_summary():
         today = datetime.now().strftime("%Y-%m-%d")

@@ -366,12 +366,13 @@ def normalize(payload):
 class TraeResult:
     """同步结果对象：status ∈ ok / not_configured / auth_expired / failed"""
 
-    def __init__(self, status, rows=None, consumed=None, total=None, message="",
-                 truncated=False):
+    def __init__(self, status, rows=None, consumed=None, total=None, balance=None,
+                 message="", truncated=False):
         self.status = status
         self.rows = rows if rows is not None else []
         self.consumed = consumed
         self.total = total
+        self.balance = balance       # total_balance：剩余积分（官方账单口径）
         self.message = message
         self.truncated = truncated   # 分页到上限没拉完（窗口内会话过多）
 
@@ -380,8 +381,9 @@ class TraeResult:
         return self.status == "ok"
 
     def __repr__(self):
-        return "TraeResult(%r, rows=%d, consumed=%r, total=%r, message=%r)" % (
-            self.status, len(self.rows), self.consumed, self.total, self.message)
+        return "TraeResult(%r, rows=%d, consumed=%r, total=%r, balance=%r, message=%r)" % (
+            self.status, len(self.rows), self.consumed, self.total, self.balance,
+            self.message)
 
 
 # ---- 传输（stdlib，同步）----
@@ -580,6 +582,7 @@ def run(sessionid, auth=None, from_epoch=0, to_epoch=None, fetch_ent=False,
     # ---- 3. 积分汇总（官方账单口径；失败不致命，按小时节流由调用方控制）----
     consumed = None
     total = None
+    balance = None
     if fetch_ent:
         _, _, text = send(API_BASE + ENT_USAGE_PATH, auth="Cloud-IDE-JWT " + jwt2,
                           body='{"require_usage":true}')
@@ -588,10 +591,13 @@ def run(sessionid, auth=None, from_epoch=0, to_epoch=None, fetch_ent=False,
                 resp = json.loads(text)
             except (ValueError, TypeError):
                 resp = None
-            summary = resp.get("usage_summary") if isinstance(resp, dict) else None
-            if isinstance(summary, dict):
-                consumed = _opt_num(summary.get("consumed_amount"))
-                total = _opt_num(summary.get("total_amount"))
+            if isinstance(resp, dict):
+                # total_balance 是剩余积分；consumed/total 是已用与总额
+                balance = _opt_num(resp.get("total_balance"))
+                summary = resp.get("usage_summary")
+                if isinstance(summary, dict):
+                    consumed = _opt_num(summary.get("consumed_amount"))
+                    total = _opt_num(summary.get("total_amount"))
 
     return TraeResult("ok", rows=rows, consumed=consumed, total=total,
-                      truncated=truncated)
+                      balance=balance, truncated=truncated)

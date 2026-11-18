@@ -35,7 +35,7 @@ def query(now=None):
     for acc in trae_client_credentials.discover(now=dt):
         item = {"uid": acc.uid, "app": acc.source_app or "Trae", "ok": False,
                 "sessions": 0, "credits": 0.0, "tokens": 0,
-                "consumed": None, "total": None, "message": ""}
+                "consumed": None, "total": None, "balance": None, "message": ""}
         if not trae_client_credentials.jwt_usable(acc, now=end):
             refreshed = trae_client_credentials.refresh(acc, now=end)
             if refreshed:
@@ -55,6 +55,7 @@ def query(now=None):
                                  for r in result.rows)
             item["consumed"] = result.consumed
             item["total"] = result.total
+            item["balance"] = result.balance
         else:
             item["message"] = result.message or result.status
         items.append(item)
