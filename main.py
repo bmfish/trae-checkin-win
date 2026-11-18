@@ -1,12 +1,13 @@
 """Trae 自动签到（独立 Windows 程序）
 
-只用两个功能：自动签到 + 签到记录，不含任何用量统计。
+功能：自动签到 + 签到记录 + 今日用量查看，不含其他统计。
 
 用法：
-    trae-checkin.exe                 常驻后台，每天 9 点后随机分钟自动签到
+    trae-checkin.exe                 打开今日用量窗口（可刷新 / 手动签到）
+    trae-checkin.exe --silent        常驻后台，每天 9 点后随机分钟自动签到
     trae-checkin.exe --once          立即签到一次（已签的账号仍然跳过）
     trae-checkin.exe --status        查看今日状态与最近签到记录（不联网）
-    trae-checkin.exe --install       注册开机自启（写入 HKCU Run）
+    trae-checkin.exe --install       注册开机自启（以 --silent 启动）
     trae-checkin.exe --uninstall     取消开机自启
 
 状态与记录目录：%USERPROFILE%\\.trae-checkin
@@ -81,10 +82,11 @@ def hide_console():
 
 
 def launch_command():
-    """开机自启命令：打包后指向 exe，开发态指向 python + main.py"""
+    """开机自启命令：始终以 --silent 常驻（不弹窗口）"""
+    extra = " --silent"
     if getattr(sys, "frozen", False):
-        return '"%s"' % sys.executable
-    return '"%s" "%s"' % (sys.executable, os.path.abspath(__file__))
+        return '"%s"%s' % (sys.executable, extra)
+    return '"%s" "%s"%s' % (sys.executable, os.path.abspath(__file__), extra)
 
 
 def set_autostart(enable):
@@ -142,6 +144,191 @@ def print_status(store):
             rec["msg"]))
 
 
+def run_ui(args):
+    """双击启动：今日用量窗口（后台线程查询，关闭即退出）"""
+    import threading
+    import tkinter as tk
+
+    import today_usage
+
+    hide_console()
+    store_dir = checkin_core.CheckinStore(args.state_dir).dir
+    try:
+        ctypes.windll.shcore.SetProcessDpiAwareness(1)
+    except Exception:
+        pass
+
+    BG, CARD = "#0f141a", "#161d26"
+    FG, MUTED, ACCENT, DANGER = "#e6edf3", "#8b98a5", "#32F08C", "#ff7b72"
+    FONT = "Microsoft YaHei UI"
+
+    root = tk.Tk()
+    root.title("Trae 今日用量")
+    root.geometry("600x500")
+    root.minsize(540, 340)
+    root.configure(bg=BG)
+
+    head = tk.Frame(root, bg=BG)
+    head.pack(fill="x", padx=20, pady=(18, 4))
+    tk.Label(head, text="Trae 今日用量", bg=BG, fg=FG,
+             font=(FONT, 15, "bold")).pack(side="left")
+    tk.Label(head, text=datetime.now().strftime("%Y-%m-%d"), bg=BG, fg=MUTED,
+             font=(FONT, 10)).pack(side="right")
+
+    body = tk.Frame(root, bg=BG)
+    body.pack(fill="both", expand=True, padx=20, pady=8)
+
+    foot = tk.Frame(root, bg=BG)
+    foot.pack(fill="x", padx=20, pady=(4, 16))
+    foot_left = tk.Frame(foot, bg=BG)
+    foot_left.pack(side="left", fill="x", expand=True)
+    note_label = tk.Label(foot_left, text="", bg=BG, fg=MUTED,
+                          font=(FONT, 9), justify="left")
+    note_label.pack(anchor="w")
+    tip_label = tk.Label(foot_left, text="", bg=BG, fg=MUTED,
+                         font=(FONT, 8), justify="left")
+    tip_label.pack(anchor="w", pady=(2, 0))
+
+    state = {"busy": False, "signing": False}
+
+    def fmt_num(value):
+        return "%.2f" % float(value or 0)
+
+    def fmt_int(value):
+        return "{:,}".format(int(value or 0))
+
+    def flat_button(text, command, primary=False):
+        return tk.Button(
+            foot, text=text, command=command, relief="flat", bd=0,
+            cursor="hand2", padx=16, pady=6,
+            font=(FONT, 10, "bold" if primary else "normal"),
+            bg=ACCENT if primary else CARD,
+            fg="#06130c" if primary else FG,
+            activebackground="#4dd9a0" if primary else "#222c38",
+            activeforeground="#06130c" if primary else FG)
+
+    def render(items):
+        for widget in body.winfo_children():
+            widget.destroy()
+        if not items:
+            tk.Label(body, text="未发现 Trae 客户端凭据\n请先登录 Trae 客户端",
+                     bg=BG, fg=MUTED, font=(FONT, 10), justify="left").pack(
+                anchor="w", pady=12)
+        for item in items:
+            card = tk.Frame(body, bg=CARD)
+            card.pack(fill="x", pady=5)
+            inner = tk.Frame(card, bg=CARD)
+            inner.pack(fill="x", padx=16, pady=12)
+            tk.Label(inner, text=item["uid"], bg=CARD, fg=FG,
+                     font=(FONT, 10, "bold")).pack(anchor="w")
+            if item["ok"]:
+                line = "今日消耗  %s 积分  ·  会话 %d" % (
+                    fmt_num(item["credits"]), item["sessions"])
+                if item["tokens"]:
+                    line += "  ·  %s token" % fmt_int(item["tokens"])
+                tk.Label(inner, text=line, bg=CARD, fg=ACCENT,
+                         font=(FONT, 10)).pack(anchor="w", pady=(4, 0))
+                if item["total"] is not None:
+                    tk.Label(inner,
+                             text="积分余额  %s / %s" % (
+                                 fmt_num(item["consumed"]), fmt_num(item["total"])),
+                             bg=CARD, fg=MUTED, font=(FONT, 9)).pack(
+                        anchor="w", pady=(2, 0))
+            else:
+                tk.Label(inner, text=item["message"] or "查询失败", bg=CARD,
+                         fg=DANGER, font=(FONT, 9)).pack(anchor="w", pady=(4, 0))
+        # 窗口高度按账号数自适应：单账号只占一个框的高度
+        height = 300 + max(1, len(items)) * 90 if items else 340
+        root.geometry("600x%d" % min(max(height, 340), 640))
+
+    def sign_summary():
+        today = datetime.now().strftime("%Y-%m-%d")
+        store = checkin_core.CheckinStore(args.state_dir)
+        try:
+            import trae_client_credentials
+            accounts = trae_client_credentials.discover()
+        except Exception:
+            accounts = []
+        signed = sum(1 for acc in accounts if store.done_today(acc.uid, today))
+        return accounts, signed, store.today_credits(today)
+
+    def update_sign_button():
+        accounts, signed, gained = sign_summary()
+        if not accounts:
+            note_label.configure(text="签到：未发现客户端账号")
+            sign_btn.configure(state=tk.DISABLED, text="无账号", bg="#1f2732",
+                               disabledforeground=MUTED)
+            return
+        note_label.configure(text="签到：%d/%d 已签 · 今日获得 +%s 积分" % (
+            signed, len(accounts), fmt_num(gained)))
+        if signed >= len(accounts):
+            # 今日全部账号已签：按钮禁用，避免重复领取
+            sign_btn.configure(state=tk.DISABLED, text="今日已签", bg="#1f2732",
+                               disabledforeground=MUTED)
+        else:
+            sign_btn.configure(state=tk.NORMAL, text="立即签到", bg=ACCENT)
+
+    def load_usage(force=False):
+        if state["busy"]:
+            return
+        state["busy"] = True
+        tip_label.configure(text="查询中…" if force else "")
+
+        def work():
+            try:
+                items, error = today_usage.load(store_dir, force=force), ""
+            except Exception as exc:
+                items, error = [], str(exc)
+            root.after(0, lambda: done(items, error))
+
+        def done(items, error):
+            state["busy"] = False
+            render(items)
+            update_sign_button()
+            tip_label.configure(text=("查询失败：%s" % error) if error else
+                                "更新于 " + datetime.now().strftime("%H:%M:%S"))
+
+        threading.Thread(target=work, daemon=True).start()
+
+    def do_checkin():
+        if state["signing"]:
+            return
+        state["signing"] = True
+        sign_btn.configure(state=tk.DISABLED, text="签到中…")
+
+        def work():
+            store = checkin_core.CheckinStore(args.state_dir)
+            try:
+                with process_lock(store.dir, timeout=10):
+                    checkin_core.run_once(store, force=True, enabled=True,
+                                          start_hour=args.start_hour,
+                                          emit=lambda m: None)
+            except Exception:
+                pass
+            root.after(0, done)
+
+        def done():
+            state["signing"] = False
+            update_sign_button()
+            load_usage(force=True)
+
+        threading.Thread(target=work, daemon=True).start()
+
+    sign_btn = flat_button("立即签到", do_checkin, primary=True)
+    sign_btn.pack(side="right")
+    refresh_btn = flat_button("刷新", lambda: load_usage(force=True))
+    refresh_btn.pack(side="right", padx=(0, 8))
+
+    update_sign_button()
+    root.after(100, load_usage)
+    # 双击后置前显示，避免窗口藏在浏览器/IDE 后面
+    root.lift()
+    root.attributes("-topmost", True)
+    root.after(1200, lambda: root.attributes("-topmost", False))
+    root.mainloop()
+    return 0
+
+
 def loop(args):
     hide_console()
     interval = max(30, int(args.interval))
@@ -168,6 +355,8 @@ def loop(args):
 def main(argv=None):
     parser = argparse.ArgumentParser(
         description="Trae 每日自动签到（自动签到 + 签到记录）")
+    parser.add_argument("--silent", action="store_true",
+                        help="常驻后台自动签到（不显示窗口）")
     parser.add_argument("--once", action="store_true", help="立即签到一次（已签账号仍跳过）")
     parser.add_argument("--status", action="store_true", help="查看今日状态与最近记录")
     parser.add_argument("--install", action="store_true", help="注册开机自启")
@@ -199,7 +388,10 @@ def main(argv=None):
         if not results:
             print("没有可签到的账号")
         return 0
-    loop(args)
+    if args.silent:
+        loop(args)
+        return 0
+    run_ui(args)
     return 0
 
 
