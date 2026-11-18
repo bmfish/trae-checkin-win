@@ -337,8 +337,8 @@ def run_ui(args, show=True):
                 tk.Label(inner, text=item["message"] or "查询失败", bg=CARD,
                          fg=DANGER, font=(FONT, 9)).pack(anchor="w", pady=(4, 0))
         # 窗口高度按账号数自适应：单账号只占一个框的高度
-        height = 330 + max(1, len(items)) * 95 if items else 370
-        root.geometry("600x%d" % min(max(height, 370), 660))
+        height = 365 + max(1, len(items)) * 95 if items else 405
+        root.geometry("600x%d" % min(max(height, 405), 690))
 
     def sign_summary():
         today = datetime.now().strftime("%Y-%m-%d")
@@ -355,18 +355,17 @@ def run_ui(args, show=True):
         if not accounts:
             return "签到：未发现客户端账号"
         text = "签到：%d/%d 已签" % (signed, len(accounts))
-        gained = checkin_core.CheckinStore(args.state_dir).today_credits(
-            datetime.now().strftime("%Y-%m-%d"))
+        store = checkin_core.CheckinStore(args.state_dir)
+        today = datetime.now().strftime("%Y-%m-%d")
+        gained = store.today_credits(today)
         if gained:
             text += " · 今日获得 +%s 积分" % fmt_num(gained)
         if signed < len(accounts):
             hour = effective_start_hour(args, store_dir)
-            today = datetime.now().strftime("%Y-%m-%d")
-            for acc in accounts:
-                if not checkin_core.CheckinStore(args.state_dir).done_today(acc.uid, today):
-                    minute = checkin_core.slot_minute(acc.uid, today)
-                    text += " · 今天 %02d:%02d 自动签" % (hour, minute)
-                    break
+            slots = ["%02d:%02d" % (hour, checkin_core.slot_minute(acc.uid, today))
+                     for acc in accounts if not store.done_today(acc.uid, today)]
+            if slots:
+                text += " · 今天 %s 自动签" % " / ".join(slots)
         return text
 
     def update_sign_button():
@@ -442,6 +441,7 @@ def run_ui(args, show=True):
         save_settings(store_dir, {"start_hour": hour})
         if autostart_enabled():
             set_autostart(True, hour)   # 自启命令同步新的起始小时
+        update_range_text()
         update_sign_button()
         tip_label.configure(text="已保存：%d 点后随机一分钟自动签到" % hour)
 
@@ -456,8 +456,14 @@ def run_ui(args, show=True):
     hour_box.pack(side="left", padx=4)
     hour_box.bind("<Return>", on_hour_change)
     hour_box.bind("<FocusOut>", on_hour_change)
-    tk.Label(time_row, text="点后随机一分钟", bg=BG, fg=MUTED,
-             font=(FONT, 8)).pack(side="left")
+    range_label = tk.Label(time_row, text="", bg=BG, fg=MUTED, font=(FONT, 8))
+    range_label.pack(side="left")
+
+    def update_range_text():
+        hour = configured_start_hour(store_dir)
+        range_label.configure(text="点后  %02d:00–%02d:59 随机一分钟" % (hour, hour))
+
+    update_range_text()
 
     def update_autostart():
         auto_btn.configure(
@@ -479,6 +485,8 @@ def run_ui(args, show=True):
     auto_btn.pack(anchor="w", pady=(4, 0))
     update_autostart()
     tip_label.pack(anchor="w", pady=(4, 0))
+    tk.Label(foot_left, text="by bmfish · github.com/bmfish/trae-checkin-win",
+             bg=BG, fg="#5b6673", font=(FONT, 7)).pack(anchor="w", pady=(6, 0))
 
     sign_btn = flat_button("立即签到", do_checkin, primary=True)
     sign_btn.pack(side="right")
