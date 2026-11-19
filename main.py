@@ -292,6 +292,7 @@ def run_ui(args, show=True):
         root.lift()
         root.attributes("-topmost", True)
         root.after(800, lambda: root.attributes("-topmost", False))
+        load_usage()   # 点开时刷新（60 秒内仍走缓存）
 
     def hide_window():
         root.withdraw()
@@ -302,8 +303,9 @@ def run_ui(args, show=True):
     tk.Frame(root, bg=ACCENT, height=1).place(x=0, y=0, relwidth=1)
     tk.Label(head, text="Trae 今日用量", bg=BG, fg=FG,
              font=(FONT, 15, "bold")).pack(side="left")
-    tk.Label(head, text=datetime.now().strftime("%Y-%m-%d"), bg=BG, fg=MUTED,
-             font=(FONT, 10)).pack(side="right")
+    date_label = tk.Label(head, text=datetime.now().strftime("%Y-%m-%d"), bg=BG,
+                          fg=MUTED, font=(FONT, 10))
+    date_label.pack(side="right")
 
     body = tk.Frame(root, bg=BG)
     body.pack(fill="both", expand=True, padx=20, pady=8)
@@ -318,7 +320,7 @@ def run_ui(args, show=True):
     tip_label = tk.Label(foot_left, text="", bg=BG, fg=MUTED,
                          font=(FONT, 8), justify="left")
 
-    state = {"busy": False, "signing": False}
+    state = {"busy": False, "signing": False, "items": []}
 
     def fmt_num(value):
         return "%.2f" % float(value or 0)
@@ -337,6 +339,7 @@ def run_ui(args, show=True):
             activeforeground="#06130c" if primary else FG)
 
     def render(items):
+        state["items"] = items
         for widget in body.winfo_children():
             widget.destroy()
         if not items:
@@ -540,9 +543,33 @@ def run_ui(args, show=True):
         except Exception:
             tray = None
 
+    def reset_daily_display():
+        """跨天展示清零：不请求接口，下次打开或点刷新再查"""
+        items = []
+        for item in state.get("items") or []:
+            clone = dict(item)
+            clone.update({"sessions": 0, "credits": 0.0, "tokens": 0})
+            items.append(clone)
+        if items:
+            render(items)
+        try:
+            os.remove(os.path.join(store_dir, "usage_cache.json"))
+        except OSError:
+            pass
+
+    def tick_date():
+        """每 5 分钟检查一次：跨天只更新日期 + 今日用量清零 + 签到恢复未签"""
+        today = datetime.now().strftime("%Y-%m-%d")
+        if date_label.cget("text") != today:
+            date_label.configure(text=today)
+            reset_daily_display()
+            update_sign_button()
+        root.after(300000, tick_date)
+
     # 关闭窗口只隐藏到托盘，真正退出走托盘菜单
     root.protocol("WM_DELETE_WINDOW", hide_window)
     pump()
+    tick_date()
     update_sign_button()
     root.after(100, load_usage)
     # 双击后置前显示，避免窗口藏在浏览器/IDE 后面
